@@ -65,23 +65,57 @@
 
 (defun integer->boolean (x) (= x 1)) 	; not sure of the idomatic way to do this
 
+(defun binary-node (op left right)
+  (make-instance 'binary-node :op op :left left :right right))
+(defun unary-node (op operand)
+  (make-instance 'unary-node :op op :operand operand))
 
 (defun qand (left right)
-  (make-instance 'binary-node
-		 :op #'(lambda (x y) (and x y))
-		 :left left
-		 :right right))
+  (binary-node #'(lambda (x y) (and x y)) left right))
 
 (defun qor (left right)
-  (make-instance 'binary-node
-		 :op #'(lambda (x y) (or x y))
-		 :left left
-		 :right right))
+  (binary-node #'(lambda (x y) (or x y)) left right))
 
-(defun qnot (node)
-  (make-instance 'unary-node
-		 :op #'(lambda (x) (not x))
-		 :operand node))
+(defun qnot (operand)
+  (unary-node #'(lambda (x) (not x)) operand))
+
+
+;;; Node visitors
+
+(defconstant currently-visiting 'visiting)
+
+(defparameter *cache* (make-hash-table))
+
+(defun visit (visitor node)
+  (multiple-value-bind (value present) (gethash node *cache*)
+    (cond
+      ((eq value currently-visiting)
+       (error "cyclic node graph detected"))
+      (present value)
+      (t (progn
+	   (setf (gethash node *cache*) currently-visiting)
+	   (let ((value (funcall visitor node)))
+	     (setf (gethash node *cache*) value)
+	     value))))))
+
+;;; Copier
+
+(defun copy (node)
+  "Returns a copy of the circuit."
+  (let ((*cache* (make-hash-table)))
+    (visit #'copy-circuit node)))
+
+(defgeneric copy-circuit (node))
+
+(defmethod copy-circuit ((node constant-node))
+  (const (constant-value node)))
+(defmethod copy-circuit ((node variable-node))
+  (var (variable-name node)))
+(defmethod copy-circuit ((node unary-node))
+  (unary-node (node-op node) (operand node)))
+(defmethod copy-circuit ((node binary-node))
+  (binary-node (node-op node) (left-operand node) (right-operand node)))
+
 
 
 ;;; Evaluator
@@ -89,8 +123,31 @@
 (defun circuit-value (node input-values)
   "Computes the output value of the specified circuit, given an assignment
 of boolean values to the input variables (an alist)."
-  (eval-circuit node input-values (make-hash-table)))
+  (let ((*cache* (make-hash-table)))
+    (visit (make-eval-visitor input-values)
+	   node)))
 
+(defgeneric eval-circuit (node env))
+
+(defmethod eval-circuit ((node constant-node) env)
+  (constant-value node))
+
+(defmethod eval-circuit ((node variable-node) env)
+  (lookup (variable-name node) env))
+
+(defmethod eval-circuit ((node unary-node) env)
+  (let* ((v (make-eval-visitor env))
+	 (value (visit v (operand node))))
+    (funcall (node-op node) value)))
+
+(defmethod eval-circuit ((node binary-node) env)
+  (let* ((v (make-eval-visitor env))
+	 (left (visit v (left-operand node)))
+	 (right (visit v (right-operand node))))
+    (funcall (node-op node) left right)))
+
+(defun make-eval-visitor (env)
+  #'(lambda (node) (eval-circuit node env)))
 
 (defun lookup (variable environment)
   "Returns the value of the variable in the environment."
@@ -100,21 +157,16 @@ of boolean values to the input variables (an alist)."
 	(error (format nil "variable ~a not present in environment" variable)))))
 
 
-(defun eval-circuit (node env cache)
-  "Evaluates a circuit node with respect to an environment. If the node value is present
-in the cache, we use that value. Otherwise, we add the resulting value to the cache."
-  (multiple-value-bind (value present) (gethash node cache)
-    (if present
-	value
-	(setf (gethash node cache)
-	      (case (type-of node)
-		(constant-node (constant-value node))
-		(variable-node (lookup (variable-name node) env))
-		(unary-node    (funcall (node-op node)
-					(eval-circuit (operand node) env cache)))
-		(binary-node   (funcall (node-op node)
-					(eval-circuit (left-operand node) env cache)
-					(eval-circuit (right-operand node) env cache))))))))
 
 
 ;;; todo: what is the unit testing workflow like?
+
+;;;
+
+(defvar *w*
+  (let*
+      ((x (var 'x))
+       (y (var 'y))
+       (z (qand x y))
+       (w (qor z (qnot x))))
+    w))
