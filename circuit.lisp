@@ -65,19 +65,21 @@
 
 (defun integer->boolean (x) (= x 1)) 	; not sure of the idomatic way to do this
 
+
+
 (defun binary-node (op left right)
   (make-instance 'binary-node :op op :left left :right right))
 (defun unary-node (op operand)
   (make-instance 'unary-node :op op :operand operand))
 
 (defun qand (left right)
-  (binary-node #'(lambda (x y) (and x y)) left right))
+  (binary-node 'and left right))
 
 (defun qor (left right)
-  (binary-node #'(lambda (x y) (or x y)) left right))
+  (binary-node 'or left right))
 
 (defun qnot (operand)
-  (unary-node #'(lambda (x) (not x)) operand))
+  (unary-node 'not operand))
 
 
 ;;; Node visitors
@@ -112,13 +114,17 @@
 (defmethod copy-circuit ((node variable-node))
   (var (variable-name node)))
 (defmethod copy-circuit ((node unary-node))
-  (unary-node (node-op node) (operand node)))
+  (unary-node (node-op node)
+	      (visit #'copy-circuit (operand node))))
 (defmethod copy-circuit ((node binary-node))
-  (binary-node (node-op node) (left-operand node) (right-operand node)))
+  (binary-node (node-op node)
+	       (visit #'copy-circuit (left-operand node))
+	       (visit #'copy-circuit (right-operand node))))
 
 
 
 ;;; Evaluator
+
 
 (defun circuit-value (node input-values)
   "Computes the output value of the specified circuit, given an assignment
@@ -126,6 +132,18 @@ of boolean values to the input variables (an alist)."
   (let ((*cache* (make-hash-table)))
     (visit (make-eval-visitor input-values)
 	   node)))
+
+(defparameter *operators*
+  `((and . ,#'(lambda (x y) (and x y)))
+    (or  . ,#'(lambda (x y) (or x y)))
+    (not . ,#'(lambda (x)   (not x)))))
+
+(defun apply-op (op &rest args)
+  "Apply an operator from the *operators* table."
+  (let ((binding (assoc op *operators*)))
+    (if binding
+	(apply (cdr (assoc op *operators*)) args)
+	(error "op ~a not found" op))))
 
 (defgeneric eval-circuit (node env))
 
@@ -138,13 +156,13 @@ of boolean values to the input variables (an alist)."
 (defmethod eval-circuit ((node unary-node) env)
   (let* ((v (make-eval-visitor env))
 	 (value (visit v (operand node))))
-    (funcall (node-op node) value)))
+    (apply-op (node-op node) value)))
 
 (defmethod eval-circuit ((node binary-node) env)
   (let* ((v (make-eval-visitor env))
 	 (left (visit v (left-operand node)))
 	 (right (visit v (right-operand node))))
-    (funcall (node-op node) left right)))
+    (apply-op (node-op node) left right)))
 
 (defun make-eval-visitor (env)
   #'(lambda (node) (eval-circuit node env)))
@@ -157,13 +175,74 @@ of boolean values to the input variables (an alist)."
 	(error (format nil "variable ~a not present in environment" variable)))))
 
 
+;;; Linearizer
+
+
+(defparameter *count* 0)
+(defparameter *inputs* nil)
+(defparameter *instructions* nil)
+
+(defun linearize (node)
+  "Converts a circuit into a simple, linearized form. Returns a list of
+instructions, the name of the 'output' variable, and the names of the input variables."
+  (let ((*count* 0)
+	(*inputs* nil)
+	(*instructions* nil)
+	(*cache* (make-hash-table)))
+    (let ((output-name (visit #'linearize-circuit node)))
+      (values (reverse *instructions*) output-name *inputs*))))
+
+(defun make-name (node)
+  "Construct a name for a node."
+  (let ((name
+	 (format nil "~a_~a"
+		 (if (typep node 'variable-node)
+		     (string (variable-name node))
+		     "t")
+		 *count*)))
+    (incf *count*)
+    ; not sure if this is the right way to produce a symbol
+    (intern (string-upcase name))))
+
+(defgeneric linearize-circuit (node))
+
+(defmethod linearize-circuit ((node constant-node))
+  (let ((name (make-name node)))
+    (progn 
+      (push (list name 'const (constant-value node)) *instructions*)
+      name)))
+
+(defmethod linearize-circuit ((node variable-node))
+  (if (member (variable-name node) *inputs*)
+      (error "duplicate variable node: ~a" (variable-name node))
+      (let ((name (make-name node)))
+	(progn
+	  (push (variable-name node) *inputs*)
+	  (push (list name 'var (variable-name node)) *instructions*)
+	  name))))
+
+(defmethod linearize-circuit ((node unary-node))
+  (let* ((operand-name (visit #'linearize-circuit (operand node)))
+	 (name (make-name node)))
+    (progn
+      (push (list name 'unary-op (node-op node) operand-name) *instructions*)
+      name)))
+
+(defmethod linearize-circuit ((node binary-node))
+  (let* ((left-name (visit #'linearize-circuit (left-operand node)))
+	 (right-name (visit #'linearize-circuit (right-operand node)))
+	 (name (make-name node)))
+    (progn
+      (push (list name 'binary-op (node-op node) left-name right-name) *instructions*)
+      name)))
+
 
 
 ;;; todo: what is the unit testing workflow like?
 
 ;;;
 
-(defvar *w*
+(defparameter *w*
   (let*
       ((x (var 'x))
        (y (var 'y))
