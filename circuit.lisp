@@ -72,15 +72,6 @@
 (defun unary-node (op operand)
   (make-instance 'unary-node :op op :operand operand))
 
-(defun qand (left right)
-  (binary-node 'and left right))
-
-(defun qor (left right)
-  (binary-node 'or left right))
-
-(defun qnot (operand)
-  (unary-node 'not operand))
-
 
 ;;; Node visitors
 
@@ -136,7 +127,21 @@ of boolean values to the input variables (an alist)."
 (defparameter *operators*
   `((and . ,#'(lambda (x y) (and x y)))
     (or  . ,#'(lambda (x y) (or x y)))
-    (not . ,#'(lambda (x)   (not x)))))
+    (not . ,#'(lambda (x)   (not x)))
+    (xor . ,#'(lambda (x y) (or (and x (not y))
+				(and (not x) y))))))
+
+(defun qand (left right)
+  (binary-node 'and left right))
+
+(defun qor (left right)
+  (binary-node 'or left right))
+
+(defun qnot (operand)
+  (unary-node 'not operand))
+
+(defun qxor (left right)
+  (binary-node 'xor left right))
 
 (defun apply-op (op &rest args)
   "Apply an operator from the *operators* table."
@@ -190,7 +195,7 @@ instructions, the name of the 'output' variable, and the names of the input vari
 	(*instructions* nil)
 	(*cache* (make-hash-table)))
     (let ((output-name (visit #'linearize-circuit node)))
-      (values (reverse *instructions*) output-name *inputs*))))
+      (values (reverse *instructions*) output-name (reverse *inputs*)))))
 
 (defun make-name (node)
   "Construct a name for a node."
@@ -236,11 +241,32 @@ instructions, the name of the 'output' variable, and the names of the input vari
       (push (list name 'binary-op (node-op node) left-name right-name) *instructions*)
       name)))
 
+;;; Compiler
 
+(defun compile-circuit (node)
+  "Compiles the circuit to a lisp function, with input variables as keyword arguments."
+  (eval (translate-circuit node)))
+
+(defun translate-circuit (node)
+  "Translates a circuit (node) to a lambda expression."
+ (multiple-value-bind (instructions output inputs) (linearize node)
+    `(lambda (&key ,@inputs)
+       (let*
+	   ,(mapcar #'translate-instruction instructions)
+	 ,output))) )
+
+(defun translate-instruction (instr)
+  "Translate an instruction to a (var init-form) list."
+  (destructuring-bind (name type . args) instr
+    (list name
+	  (case type
+	    (var       (car args))
+	    (const     (car args))
+	    (unary-op  args)
+	    (binary-op args)))))
 
 ;;; todo: what is the unit testing workflow like?
 
-;;;
 
 (defparameter *w*
   (let*
@@ -249,3 +275,10 @@ instructions, the name of the 'output' variable, and the names of the input vari
        (z (qand x y))
        (w (qor z (qnot x))))
     w))
+
+(defparameter *wfn* (compile-circuit *w*))
+
+(assert (funcall *wfn* :x t :y t))
+(assert (funcall *wfn* :x nil :y t))
+(assert (funcall *wfn* :x nil :y nil))
+(assert (not (funcall *wfn* :x t :y nil)))
